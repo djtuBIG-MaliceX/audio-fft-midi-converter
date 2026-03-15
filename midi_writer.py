@@ -90,10 +90,16 @@ class MidiFileWriter:
             mido_channel = self._channel_to_mido_channel(channel)
 
             # Add program change 79 (ocarina) to all tracks
-            track.append(Message("program_change", program=79, time=0))
+            track.append(
+                Message("program_change", channel=mido_channel, program=79, time=0)
+            )
 
             # Add CC91 (damper pedal) set to 0 to all tracks
-            track.append(Message("control_change", control=91, value=0, time=0))
+            track.append(
+                Message(
+                    "control_change", channel=mido_channel, control=91, value=0, time=0
+                )
+            )
 
             # Add track name
             track_name = f"Channel {channel}" if channel != 10 else "Percussion"

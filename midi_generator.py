@@ -30,7 +30,6 @@ class MidiEventGenerator:
         pitch_bend_range: int = 24,
         velocity: int = 100,
         volume_cc: int = 7,
-        expression_cc: int = 11,
     ):
         """
         Initialize MIDI event generator.
@@ -41,14 +40,12 @@ class MidiEventGenerator:
             pitch_bend_range: Pitch bend range in semitones (default 24)
             velocity: Fixed note velocity 1-127 (default 100)
             volume_cc: CC number for channel volume (default 7)
-            expression_cc: CC number for expression control (default 11)
         """
         self.bpm = bpm
         self.ticks_per_beat = ticks_per_beat
         self.pitch_bend_range = pitch_bend_range
         self.velocity = velocity
         self.volume_cc = volume_cc
-        self.expression_cc = expression_cc
 
         # State tracking per channel
         self.channel_state: dict[int, dict] = {}
@@ -290,7 +287,7 @@ class MidiEventGenerator:
                             )
                         )
 
-            # Update volume/expression based on amplitude
+            # Update volume based on amplitude
             # Normalize dB to 0-127 range (assuming -60dB to 0dB is typical range)
             normalized_volume = int(((amp_db + 60) / 60) * 127)
             normalized_volume = max(0, min(127, normalized_volume))
@@ -301,16 +298,6 @@ class MidiEventGenerator:
                     event_type="cc",
                     channel=channel,
                     data={"cc_number": self.volume_cc, "value": normalized_volume},
-                )
-            )
-
-            # Also update expression for finer control
-            self.events.append(
-                MidiEvent(
-                    time=frame_time,
-                    event_type="cc",
-                    channel=channel,
-                    data={"cc_number": self.expression_cc, "value": normalized_volume},
                 )
             )
 

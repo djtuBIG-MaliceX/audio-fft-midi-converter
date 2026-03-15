@@ -1,6 +1,7 @@
 """Channel-to-frequency band mapping module."""
 
 import numpy as np
+import math
 from dataclasses import dataclass, field
 
 from fft_analyzer import hz_to_midi, midi_to_hz
@@ -38,14 +39,16 @@ class ChannelMapper:
         self.n_channels = n_channels
         self.exclude_channel = exclude_channel
 
-        # Calculate MIDI note range per channel using logarithmic spacing
-        # Start from C1 (MIDI note 12) and go up to the highest frequency
-        min_note = 12  # C1
-        max_note = 127  # Highest MIDI note
+        # Calculate frequency range per channel using logarithmic spacing
+        # Start from A2 (110 Hz) and go up to G8 (12441 Hz)
+        fmin = 110.0  # A2
+        fmax = 12441.0  # G8
 
-        # Calculate note range per channel using logarithmic spacing
-        # Each channel gets a note band that is 1/n_channels of the total range
-        note_per_channel = (max_note - min_note) / n_channels
+        # Calculate logarithmic frequency bands using exponential spacing
+        # This ensures more even coverage across the frequency spectrum
+        log_fmin = math.log(fmin)
+        log_fmax = math.log(fmax)
+        log_range = log_fmax - log_fmin
 
         self.channels: list[ChannelState] = []
         channel_idx = 0
@@ -54,13 +57,20 @@ class ChannelMapper:
             # Skip excluded channel (e.g., channel 10 for percussion)
             midi_channel = i + 1 if i < exclude_channel - 1 else i + 2
 
-            # Calculate MIDI note range for this channel
-            start_note = int(min_note + i * note_per_channel)
-            end_note = int(min_note + (i + 1) * note_per_channel)
+            # Calculate logarithmic frequency range for this channel
+            log_min_freq = log_fmin + i * (log_range / n_channels)
+            log_max_freq = log_fmin + (i + 1) * (log_range / n_channels)
+
+            min_freq = math.exp(log_min_freq)
+            max_freq = math.exp(log_max_freq)
+
+            # Convert frequency range to MIDI note range
+            min_note = hz_to_midi(min_freq)
+            max_note = hz_to_midi(max_freq)
 
             # Convert to octave numbers (octave = note // 12)
-            start_octave = start_note // 12
-            end_octave = end_note // 12
+            start_octave = min_note // 12
+            end_octave = max_note // 12
 
             self.channels.append(
                 ChannelState(

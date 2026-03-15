@@ -98,7 +98,7 @@ class MidiEventGenerator:
         Determine if a new note-on event should be triggered.
 
         Triggers new note when:
-        1. Frequency drift exceeds pitch bend range (±24 semitones)
+        1. Frequency drift exceeds 7 semitones (a fifth) - always new note
         2. Sudden volume increase ≥6dB
 
         Args:
@@ -114,9 +114,9 @@ class MidiEventGenerator:
         if last_note is None:
             return True
 
-        # Check frequency drift beyond pitch bend range
+        # Check frequency drift beyond 7 semitones (a fifth) - always new note
         semitone_drift = abs(self._semitones_between(last_note, current_note))
-        if semitone_drift > self.pitch_bend_range:
+        if semitone_drift > 7:
             return True
 
         # Check sudden volume increase (≥6dB threshold)

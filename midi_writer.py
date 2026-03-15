@@ -72,16 +72,28 @@ class MidiFileWriter:
                 channel_events[ch] = []
             channel_events[ch].append((ticks, event))
 
+        # Create separate track for tempo
+        tempo_track = MidiTrack()
+        self.mid.tracks.append(tempo_track)
+
+        # Add tempo message to tempo track
+        # Tempo: microseconds per quarter note
+        us_per_beat = int(60_000_000 / self.bpm)
+        tempo_track.append(mido.MetaMessage("set_tempo", tempo=us_per_beat, time=0))
+
+        # Add track name to tempo track
+        tempo_track.append(mido.MetaMessage("track_name", name="Tempo", time=0))
+
         # Write events to tracks with proper delta times
         for channel, ch_events in channel_events.items():
             track = self._get_track_for_channel(channel)
             mido_channel = self._channel_to_mido_channel(channel)
 
-            # Add tempo message to first track (channel 1 typically)
-            if channel == 1:
-                # Tempo: microseconds per quarter note
-                us_per_beat = int(60_000_000 / self.bpm)
-                track.append(mido.MetaMessage("set_tempo", tempo=us_per_beat, time=0))
+            # Add program change 79 (ocarina) to all tracks
+            track.append(Message("program_change", program=79, time=0))
+
+            # Add CC91 (damper pedal) set to 0 to all tracks
+            track.append(Message("control_change", control=91, value=0, time=0))
 
             # Add track name
             track_name = f"Channel {channel}" if channel != 10 else "Percussion"

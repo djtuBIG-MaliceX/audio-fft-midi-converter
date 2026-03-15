@@ -266,7 +266,7 @@ class MidiEventGenerator:
 
                 state["active_note"] = midi_note
             else:
-                # Same note - apply pitch bend if frequency drifted
+                # Same note - apply pitch bend if frequency drifted significantly
                 if (
                     state["last_midi_note"] is not None
                     and state["last_frequency_hz"] is not None
@@ -275,31 +275,42 @@ class MidiEventGenerator:
                         state["last_midi_note"], midi_note
                     )
 
-                    # Only send pitch bend if there's actual drift
-                    if abs(semitone_drift) > 0.1:  # Threshold to avoid noise
+                    # Only send pitch bend if there's actual drift beyond threshold
+                    if abs(semitone_drift) > 0.5:  # Increased threshold to avoid noise
                         lsb, msb = self._calculate_pitch_bend_value(semitone_drift)
-                        self.events.append(
-                            MidiEvent(
-                                time=frame_time,
-                                event_type="pitch_bend",
-                                channel=channel,
-                                data={"lsb": lsb, "msb": msb},
-                            )
-                        )
 
-            # Update volume based on amplitude
+                        # Only send if pitch bend value changed from last one
+                        current_bend = (lsb, msb)
+                        if state.get("last_pitch_bend") != current_bend:
+                            self.events.append(
+                                MidiEvent(
+                                    time=frame_time,
+                                    event_type="pitch_bend",
+                                    channel=channel,
+                                    data={"lsb": lsb, "msb": msb},
+                                )
+                            )
+                            state["last_pitch_bend"] = current_bend
+
+            # Update volume based on amplitude only if changed significantly
             # Normalize dB to 0-127 range (assuming -60dB to 0dB is typical range)
             normalized_volume = int(((amp_db + 60) / 60) * 127)
             normalized_volume = max(0, min(127, normalized_volume))
 
-            self.events.append(
-                MidiEvent(
-                    time=frame_time,
-                    event_type="cc",
-                    channel=channel,
-                    data={"cc_number": self.volume_cc, "value": normalized_volume},
+            # Only send volume CC if changed by more than 1 unit (avoid spam)
+            if (
+                "last_volume_cc" not in state
+                or abs(normalized_volume - state["last_volume_cc"]) > 1
+            ):
+                self.events.append(
+                    MidiEvent(
+                        time=frame_time,
+                        event_type="cc",
+                        channel=channel,
+                        data={"cc_number": self.volume_cc, "value": normalized_volume},
+                    )
                 )
-            )
+                state["last_volume_cc"] = normalized_volume
 
             # Update state
             state["last_midi_note"] = midi_note

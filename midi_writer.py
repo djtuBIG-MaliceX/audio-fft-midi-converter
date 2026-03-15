@@ -231,7 +231,7 @@ def generate_midi_from_audio(
 
     # Find dominant frequency peaks per frame
     print("Extracting frequency peaks...")
-    peaks_per_frame = find_dominant_frequencies(magnitude, frequencies, n_peaks=15)
+    peaks_per_frame = find_dominant_frequencies(magnitude, frequencies, n_peaks=20)
 
     # Initialize channel mapper and MIDI generator
     channel_mapper = ChannelMapper(n_channels=15, exclude_channel=10)

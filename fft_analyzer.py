@@ -123,18 +123,38 @@ def find_dominant_frequencies(
         frame_magnitude = magnitude_db[:, frame_idx]
 
         # Find peaks above threshold
-        valid_indices = np.where(frame_magnitude > min_db + 20)[0]  # Within 20dB of max
+        valid_indices = np.where(frame_magnitude > min_db + 20)[0]
 
         if len(valid_indices) == 0:
             peaks_per_frame.append([])
             continue
 
-        # Sort by amplitude and get top n_peaks
+        # Sort by amplitude ( loudest first)
         sorted_indices = valid_indices[np.argsort(frame_magnitude[valid_indices])[::-1]]
-        top_indices = sorted_indices[:n_peaks]
+        
+        # Get top peaks, but filter to keep only local maxima
+        # This prevents harmonics/spurious peaks from dominating
+        peak_indices = []
+        for idx in sorted_indices:
+            # Check if this is a local maximum (or near the edge)
+            is_local_max = False
+            if idx == 0:
+                is_local_max = frame_magnitude[idx] > frame_magnitude[idx + 1]
+            elif idx == len(frame_magnitude) - 1:
+                is_local_max = frame_magnitude[idx] > frame_magnitude[idx - 1]
+            else:
+                is_local_max = (frame_magnitude[idx] > frame_magnitude[idx - 1] and 
+                               frame_magnitude[idx] > frame_magnitude[idx + 1])
+            
+            if is_local_max:
+                peak_indices.append(idx)
+                
+                # Stop when we have enough peaks
+                if len(peak_indices) >= n_peaks:
+                    break
 
         frame_peaks = []
-        for idx in top_indices:
+        for idx in peak_indices:
             freq_hz = float(frequencies[idx])
             amp_db = float(frame_magnitude[idx])
             midi_note = hz_to_midi(freq_hz)

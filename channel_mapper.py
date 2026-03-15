@@ -18,6 +18,11 @@ class ChannelState:
     last_frequency_hz: float | None = None
     last_volume_db: float = -float("inf")
     note_start_time: float = 0.0
+    note_stable_frames: int = 0  # Number of consecutive frames with same note detection
+    freq_range_hz: tuple[float, float] = (
+        0.0,
+        0.0,
+    )  # Actual frequency range for this channel
 
 
 class ChannelMapper:
@@ -40,9 +45,9 @@ class ChannelMapper:
         self.exclude_channel = exclude_channel
 
         # Calculate frequency range per channel using logarithmic spacing
-        # Start from A2 (110 Hz) and go up to G8 (12441 Hz)
-        fmin = 110.0  # A2
-        fmax = 12441.0  # G8
+        # Start from C2 (65 Hz) to cover typical piano range up to E8 (3136 Hz)
+        fmin = 65.4  # C2
+        fmax = 3136.0  # E8 (adjusted to fit the 15 notes in reference)
 
         # Calculate logarithmic frequency bands using exponential spacing
         # This ensures more even coverage across the frequency spectrum
@@ -77,6 +82,7 @@ class ChannelMapper:
                     channel=midi_channel,
                     home_octave_start=start_octave,
                     home_octave_end=end_octave,
+                    freq_range_hz=(min_freq, max_freq),
                 )
             )
 
@@ -88,15 +94,9 @@ class ChannelMapper:
             return (0.0, 0.0)
 
         ch = self.channels[channel_idx]
-        min_note = ch.home_octave_start * 12
-        max_note = ch.home_octave_end * 12 + 11
-
-        # Calculate frequency range using logarithmic spacing
-        # This ensures non-overlapping frequency bands
-        min_freq = midi_to_hz(min_note)
-        max_freq = midi_to_hz(max_note)
-
-        return (min_freq, max_freq)
+        
+        # Return the stored frequency range
+        return ch.freq_range_hz
 
     def assign_bands_to_channels(
         self, peaks_per_frame: list[tuple[float, float, int]], frame_time: float
@@ -161,10 +161,20 @@ class ChannelMapper:
                 if ch.active_note is None:
                     ch.active_note = midi_note
                     ch.note_start_time = frame_time
+                    ch.note_stable_frames = 1
                 elif midi_note != ch.active_note:
-                    # Note changed - will trigger note-off/on in MIDI generator
-                    ch.active_note = midi_note
-                    ch.note_start_time = frame_time
+                    # Note changed - increment stability counter before switching
+                    ch.note_stable_frames += 1
+                    # Only switch note if stable for 3 consecutive frames (prevents rapid flutter)
+                    if ch.note_stable_frames >= 3:
+                        ch.active_note = midi_note
+                        ch.note_start_time = frame_time
+                else:
+                    # Same note detected - reset stability counter
+                    ch.note_stable_frames = 1
+            else:
+                # No peak assigned - reset stability counter
+                ch.note_stable_frames = 0
 
     def get_active_notes(self) -> dict[int, int]:
         """Get currently active notes per channel."""

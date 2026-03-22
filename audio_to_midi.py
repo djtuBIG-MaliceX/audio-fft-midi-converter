@@ -83,6 +83,12 @@ Output:
     )
 
     parser.add_argument(
+        "--formant-mode",
+        action="store_true",
+        help="Enable formant mode for multiple peaks per channel (speech formants)",
+    )
+
+    parser.add_argument(
         "--frame-rate",
         type=float,
         default=50.0,
@@ -167,6 +173,7 @@ def main():
             pitch_bend_range=args.pitch_bend_range,
             velocity=args.velocity,
             frame_duration=frame_duration,
+            formant_mode=args.formant_mode,
         )
 
     except ImportError as e:

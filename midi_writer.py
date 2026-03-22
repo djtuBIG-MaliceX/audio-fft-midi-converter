@@ -180,9 +180,10 @@ def generate_midi_from_audio(
     output_path: str,
     bpm: int = 120,
     ticks_per_beat: int = 480,
-    pitch_bend_range: int = 24,
+    pitch_bend_range: int = 12,
     velocity: int = 100,
     frame_duration: float = 0.020,
+    formant_mode: bool = False,
 ) -> None:
     """
     Complete pipeline: convert audio file to MIDI file.
@@ -192,9 +193,10 @@ def generate_midi_from_audio(
         output_path: Output MIDI file path
         bpm: Tempo in beats per minute (default 120)
         ticks_per_beat: MIDI ticks per quarter note (default 480)
-        pitch_bend_range: Pitch bend range in semitones (default 24)
+        pitch_bend_range: Pitch bend range in semitones (default 12)
         velocity: Fixed note velocity (default 100)
         frame_duration: Analysis frame duration in seconds (default 0.020 = 20ms)
+        formant_mode: If True, track multiple peaks per channel for formants
     """
     from audio_loader import load_audio
     from fft_analyzer import compute_cqt, find_dominant_frequencies, hz_to_midi
@@ -231,7 +233,9 @@ def generate_midi_from_audio(
 
     # Find dominant frequency peaks per frame
     print("Extracting frequency peaks...")
-    peaks_per_frame = find_dominant_frequencies(magnitude, frequencies, n_peaks=20)
+    peaks_per_frame = find_dominant_frequencies(
+        magnitude, frequencies, n_peaks=20, formant_mode=formant_mode
+    )
 
     # Initialize channel mapper and MIDI generator
     channel_mapper = ChannelMapper(n_channels=15, exclude_channel=10)
@@ -240,6 +244,7 @@ def generate_midi_from_audio(
         ticks_per_beat=ticks_per_beat,
         pitch_bend_range=pitch_bend_range,
         velocity=velocity,
+        formant_mode=formant_mode,
     )
 
     # Process each frame

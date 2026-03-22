@@ -87,7 +87,13 @@ def main():
 
     original_argv = sys.argv.copy()
     try:
-        sys.argv = ["audio_to_midi.py", str(test_audio), "-o", str(output_midi)]
+        sys.argv = [
+            "audio_to_midi.py",
+            str(test_audio),
+            "-o",
+            str(output_midi),
+            "--formant-mode",
+        ]
         midi_main()
     finally:
         sys.argv = original_argv

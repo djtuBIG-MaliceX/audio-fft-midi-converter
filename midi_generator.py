@@ -303,18 +303,31 @@ class MidiEventGenerator:
             else:
                 semitone_drift = 0.0
 
-            # Smooth pitch bend using EMA (alpha=0.3)
-            if semitone_drift != 0:
-                if state["smoothed_frequency_hz"] is None:
-                    state["smoothed_frequency_hz"] = freq_hz
-                else:
-                    alpha = 0.3
-                    # Update smoothed frequency (for next iteration)
+            # Smooth pitch bend using EMA (alpha=0.3) for continuous violin-like transitions
+            if state["smoothed_frequency_hz"] is None:
+                # Initialize smoothed frequency
+                state["smoothed_frequency_hz"] = freq_hz
+            else:
+                # EMA: smoothed_freq = alpha * new_value + (1 - alpha) * old_smoothed
+                alpha = 0.3
+                state["smoothed_frequency_hz"] = (
+                    alpha * freq_hz + (1 - alpha) * state["smoothed_frequency_hz"]
+                )
+            
+            # Calculate semitone drift from smoothed (not raw) frequency
+            if state["active_note"] is not None:
+                expected_center = 440.0 * (2.0 ** ((state["active_note"] - 69) / 12.0))
+                smoothed_semitone_drift = self._semitones_between_frequencies(
+                    expected_center, state["smoothed_frequency_hz"]
+                )
+            else:
+                smoothed_semitone_drift = 0.0
             
             # Only send pitch bend if there's actual drift beyond threshold
-            if abs(semitone_drift) > 0.25:
-                lsb, msb = self._calculate_pitch_bend_value(semitone_drift)
-
+            # Only send pitch bend if there's actual drift beyond threshold
+            if abs(smoothed_semitone_drift) > 0.1:
+                lsb, msb = self._calculate_pitch_bend_value(smoothed_semitone_drift)
+                
                 current_bend = (lsb, msb)
                 if state.get("last_pitch_bend") != current_bend:
                     self.events.append(

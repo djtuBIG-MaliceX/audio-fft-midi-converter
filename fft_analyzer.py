@@ -98,6 +98,9 @@ def find_dominant_frequencies(
     frequencies: np.ndarray,
     n_peaks: int = 15,
     min_db: float = -60.0,
+    target_frequency_hz: float | None = None,
+    bandwidth_semitones: float = 3.0,
+    formant_mode: bool = False,
 ) -> list[list[tuple[float, float, int]]]:
     """
     Find the dominant frequency peaks in a magnitude spectrum.
@@ -107,6 +110,9 @@ def find_dominant_frequencies(
         frequencies: Array of frequencies corresponding to bins
         n_peaks: Maximum number of peaks to return per frame
         min_db: Minimum amplitude threshold in dB
+        target_frequency_hz: Expected frequency for active tracking (optional)
+        bandwidth_semitones: Frequency tolerance around target in semitones
+        formant_mode: If True, return up to 3 peaks per channel for formant preservation
 
     Returns:
         List of tuples (frequency_hz, amplitude_db, midi_note) for each peak
@@ -122,36 +128,45 @@ def find_dominant_frequencies(
     for frame_idx in range(n_frames):
         frame_magnitude = magnitude_db[:, frame_idx]
 
-        # Find peaks above threshold
-        valid_indices = np.where(frame_magnitude > min_db + 20)[0]
+        # Determine threshold based on whether we have a target frequency
+        if target_frequency_hz is not None:
+            # Active tracking: use tighter threshold (-50dB = min_db + 10)
+            active_threshold = min_db + 10
+            valid_indices = np.where(frame_magnitude > active_threshold)[0]
+        else:
+            # Inactive: use looser threshold (-55dB = min_db + 5)
+            inactive_threshold = min_db + 5
+            valid_indices = np.where(frame_magnitude > inactive_threshold)[0]
 
         if len(valid_indices) == 0:
             peaks_per_frame.append([])
             continue
 
-        # Sort by amplitude ( loudest first)
-        sorted_indices = valid_indices[np.argsort(frame_magnitude[valid_indices])[::-1]]
-        
-        # Get top peaks, but filter to keep only local maxima
-        # This prevents harmonics/spurious peaks from dominating
-        peak_indices = []
-        for idx in sorted_indices:
-            # Check if this is a local maximum (or near the edge)
-            is_local_max = False
-            if idx == 0:
-                is_local_max = frame_magnitude[idx] > frame_magnitude[idx + 1]
-            elif idx == len(frame_magnitude) - 1:
-                is_local_max = frame_magnitude[idx] > frame_magnitude[idx - 1]
-            else:
-                is_local_max = (frame_magnitude[idx] > frame_magnitude[idx - 1] and 
-                               frame_magnitude[idx] > frame_magnitude[idx + 1])
-            
-            if is_local_max:
-                peak_indices.append(idx)
-                
-                # Stop when we have enough peaks
-                if len(peak_indices) >= n_peaks:
-                    break
+        # Filter by bandwidth if target frequency is specified
+        if target_frequency_hz is not None:
+            freq_range_min = target_frequency_hz / (2 ** (bandwidth_semitones / 12))
+            freq_range_max = target_frequency_hz * (2 ** (bandwidth_semitones / 12))
+            valid_indices = [
+                idx
+                for idx in valid_indices
+                if freq_range_min <= frequencies[idx] <= freq_range_max
+            ]
+
+        if len(valid_indices) == 0:
+            peaks_per_frame.append([])
+            continue
+
+        # Calculate exact frequency for centroid refinement
+        valid_magnitudes = frame_magnitude[valid_indices]
+
+        # Sort by amplitude (loudest first)
+        sorted_indices = valid_indices[np.argsort(valid_magnitudes)[::-1]]
+
+        # Determine how many peaks to return
+        max_peaks = 3 if formant_mode else n_peaks
+
+        # Get top peaks (no local maxima filtering for better formant capture)
+        peak_indices = sorted_indices[:max_peaks]
 
         frame_peaks = []
         for idx in peak_indices:

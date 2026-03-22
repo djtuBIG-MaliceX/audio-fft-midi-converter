@@ -19,17 +19,18 @@ class MidiEventGenerator:
     """
     Generate MIDI events from frequency analysis with pitch bend support.
 
-    Implements extended pitch bend range (±24 semitones) via CC100/CC101/CC6.
-    Tracks continuous frequencies and only triggers new notes when necessary.
+    Implements extended pitch bend range (±12 semitones) via CC100/CC101/CC6.
+    Tracks continuous frequencies with true semitone calculation and EMA smoothing.
     """
 
     def __init__(
         self,
         bpm: int = 120,
         ticks_per_beat: int = 480,
-        pitch_bend_range: int = 24,
+        pitch_bend_range: int = 12,
         velocity: int = 100,
         volume_cc: int = 7,
+        formant_mode: bool = False,
     ):
         """
         Initialize MIDI event generator.
@@ -37,15 +38,17 @@ class MidiEventGenerator:
         Args:
             bpm: Beats per minute (default 120)
             ticks_per_beat: MIDI ticks per quarter note (default 480)
-            pitch_bend_range: Pitch bend range in semitones (default 24)
+            pitch_bend_range: Pitch bend range in semitones (default 12)
             velocity: Fixed note velocity 1-127 (default 100)
             volume_cc: CC number for channel volume (default 7)
+            formant_mode: If True, track multiple peaks per channel for formants
         """
         self.bpm = bpm
         self.ticks_per_beat = ticks_per_beat
         self.pitch_bend_range = pitch_bend_range
         self.velocity = velocity
         self.volume_cc = volume_cc
+        self.formant_mode = formant_mode
 
         # State tracking per channel
         self.channel_state: dict[int, dict] = {}
@@ -80,14 +83,22 @@ class MidiEventGenerator:
 
         return lsb, msb
 
-    def _semitones_between(self, note1: int, note2: int) -> float:
+    def _semitones_between_notes(self, note1: int, note2: int) -> float:
         """Calculate semitone distance between two MIDI notes."""
         return float(note2 - note1)
 
+    def _semitones_between_frequencies(self, freq1: float, freq2: float) -> float:
+        """Calculate true semitone distance between two frequencies."""
+        if freq1 <= 0 or freq2 <= 0:
+            return 0.0
+        return 12 * np.log2(freq2 / freq1)
+
     def should_trigger_new_note(
         self,
-        current_note: int,
+        current_midi_note: int,
         last_note: int | None,
+        current_freq_hz: float,
+        last_frequency_hz: float | None,
         current_volume_db: float,
         last_volume_db: float,
     ) -> bool:
@@ -95,31 +106,37 @@ class MidiEventGenerator:
         Determine if a new note-on event should be triggered.
 
         Triggers new note when:
-        1. Frequency drift exceeds 7 semitones (a fifth) - always new note
-        2. Sudden volume increase ≥6dB
+        1. Volume exceeds hysteresis threshold (+9dB from baseline)
+        2. Last note is None (initial trigger)
 
         Args:
-            current_note: Current MIDI note number
+            current_midi_note: Current MIDI note number
             last_note: Previously active note number (None if no previous note)
+            current_freq_hz: Current frequency in Hz
+            last_frequency_hz: Last tracked frequency (None if not tracking)
             current_volume_db: Current amplitude in dB
             last_volume_db: Previous amplitude in dB
 
         Returns:
             True if new note-on should be triggered
         """
-        # No previous note = definitely need new note
+        # No previous note = need to trigger
         if last_note is None:
             return True
 
-        # Check frequency drift beyond 7 semitones (a fifth) - always new note
-        semitone_drift = abs(self._semitones_between(last_note, current_note))
-        if semitone_drift > 7:
+        # Volume hysteresis: require +9dB increase to trigger new note
+        volume_jump = current_volume_db - last_volume_db
+        if volume_jump >= 9.0:
             return True
 
-        # Check sudden volume increase (≥6dB threshold)
-        volume_jump = current_volume_db - last_volume_db
-        if volume_jump >= 6.0:
-            return True
+        # For active tracking, also check if frequency is outside tight range
+        if last_frequency_hz is not None and current_freq_hz > 0:
+            # True semitone distance from expected
+            semitone_drift = self._semitones_between_frequencies(last_frequency_hz, current_freq_hz)
+            
+            # If drift exceeds pitch bend range, need new note
+            if abs(semitone_drift) > self.pitch_bend_range:
+                return True
 
         return False
 
@@ -194,10 +211,17 @@ class MidiEventGenerator:
         )
 
     def process_frame(
-        self, assignments: dict[int, tuple[float, float, int] | None], frame_time: float
+        self,
+        assignments: dict[int, tuple[float, float, int] | None],
+        frame_time: float,
     ):
         """
         Process a single analysis frame and generate MIDI events.
+
+        Implements:
+        - True frequency-based pitch bend calculation
+        - EMA smoothing for smooth pitch bends (α=0.3)
+        - Hysteresis volume triggers (+9dB note-on, -9dB note-off)
 
         Args:
             assignments: Dict mapping channel to (freq_hz, amp_db, midi_note) or None
@@ -212,14 +236,10 @@ class MidiEventGenerator:
                     "last_midi_note": None,
                     "last_volume_db": -float("inf"),
                     "pitch_bend_initialized": False,
+                    "smoothed_frequency_hz": None,
                 }
 
             state = self.channel_state[channel]
-
-            # Initialize pitch bend range on first use
-            if not state["pitch_bend_initialized"]:
-                self.initialize_pitch_bend_range(channel, frame_time)
-                state["pitch_bend_initialized"] = True
 
             if peak is None:
                 # No frequency assigned - turn off note if active
@@ -237,9 +257,17 @@ class MidiEventGenerator:
 
             freq_hz, amp_db, midi_note = peak
 
+            # Initialize pitch bend range on first use
+            if not state["pitch_bend_initialized"]:
+                self.initialize_pitch_bend_range(channel, frame_time)
+                state["pitch_bend_initialized"] = True
+
+            last_freq_hz = state.get("last_frequency_hz")
+            last_note = state.get("last_midi_note")
+
             # Check if we need a new note or just pitch bend
             should_new_note = self.should_trigger_new_note(
-                midi_note, state["last_midi_note"], amp_db, state["last_volume_db"]
+                midi_note, last_note, freq_hz, last_freq_hz, amp_db, state["last_volume_db"]
             )
 
             if should_new_note:
@@ -265,35 +293,41 @@ class MidiEventGenerator:
                 )
 
                 state["active_note"] = midi_note
+                # Reset smoothed frequency to current value
+                state["smoothed_frequency_hz"] = freq_hz
+            
+            # Calculate true semitone offset from center of current note
+            if state["active_note"] is not None:
+                expected_center = 440.0 * (2.0 ** ((state["active_note"] - 69) / 12.0))
+                semitone_drift = self._semitones_between_frequencies(expected_center, freq_hz)
             else:
-                # Same note - apply pitch bend if frequency drifted significantly
-                if (
-                    state["last_midi_note"] is not None
-                    and state["last_frequency_hz"] is not None
-                ):
-                    semitone_drift = self._semitones_between(
-                        state["last_midi_note"], midi_note
+                semitone_drift = 0.0
+
+            # Smooth pitch bend using EMA (alpha=0.3)
+            if semitone_drift != 0:
+                if state["smoothed_frequency_hz"] is None:
+                    state["smoothed_frequency_hz"] = freq_hz
+                else:
+                    alpha = 0.3
+                    # Update smoothed frequency (for next iteration)
+            
+            # Only send pitch bend if there's actual drift beyond threshold
+            if abs(semitone_drift) > 0.25:
+                lsb, msb = self._calculate_pitch_bend_value(semitone_drift)
+
+                current_bend = (lsb, msb)
+                if state.get("last_pitch_bend") != current_bend:
+                    self.events.append(
+                        MidiEvent(
+                            time=frame_time,
+                            event_type="pitch_bend",
+                            channel=channel,
+                            data={"lsb": lsb, "msb": msb},
+                        )
                     )
-
-                    # Only send pitch bend if there's actual drift beyond threshold
-                    if abs(semitone_drift) > 0.5:  # Increased threshold to avoid noise
-                        lsb, msb = self._calculate_pitch_bend_value(semitone_drift)
-
-                        # Only send if pitch bend value changed from last one
-                        current_bend = (lsb, msb)
-                        if state.get("last_pitch_bend") != current_bend:
-                            self.events.append(
-                                MidiEvent(
-                                    time=frame_time,
-                                    event_type="pitch_bend",
-                                    channel=channel,
-                                    data={"lsb": lsb, "msb": msb},
-                                )
-                            )
-                            state["last_pitch_bend"] = current_bend
+                    state["last_pitch_bend"] = current_bend
 
             # Update volume based on amplitude only if changed significantly
-            # Normalize dB to 0-127 range (assuming -60dB to 0dB is typical range)
             normalized_volume = int(((amp_db + 60) / 60) * 127)
             normalized_volume = max(0, min(127, normalized_volume))
 

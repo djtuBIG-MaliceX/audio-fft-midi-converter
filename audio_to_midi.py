@@ -77,9 +77,9 @@ Output:
     parser.add_argument(
         "--pitch-bend-range",
         type=int,
-        default=24,
+        default=12,
         dest="pitch_bend_range",
-        help="Pitch bend range in semitones (default: 24)",
+        help="Pitch bend range in semitones (default: 12)",
     )
 
     parser.add_argument(

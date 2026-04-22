@@ -1,4 +1,4 @@
-"""MIDI event generation logic for audio-to-MIDI conversion."""
+"""MIDI event generation logic for audio-to-MIDI conversion with formant awareness."""
 
 import numpy as np
 from dataclasses import dataclass, field
@@ -17,10 +17,13 @@ class MidiEvent:
 
 class MidiEventGenerator:
     """
-    Generate MIDI events from frequency analysis with pitch bend support.
+    Generate MIDI events from frequency analysis with formant-aware pitch bend.
 
-    Implements extended pitch bend range (±12 semitones) via CC100/CC101/CC6.
-    Tracks continuous frequencies with true semitone calculation and EMA smoothing.
+    Implements:
+    - Reduced EMA smoothing (alpha=0.15) for smoother but more responsive tracking
+    - Dynamic pitch bend threshold based on formant stability
+    - Formant stability propagation from channel mapper
+    - Cleaner transitions with higher thresholds for stable formants
     """
 
     def __init__(
@@ -30,7 +33,6 @@ class MidiEventGenerator:
         pitch_bend_range: int = 12,
         velocity: int = 100,
         volume_cc: int = 7,
-        formant_mode: bool = False,
     ):
         """
         Initialize MIDI event generator.
@@ -41,14 +43,12 @@ class MidiEventGenerator:
             pitch_bend_range: Pitch bend range in semitones (default 12)
             velocity: Fixed note velocity 1-127 (default 100)
             volume_cc: CC number for channel volume (default 7)
-            formant_mode: If True, track multiple peaks per channel for formants
         """
         self.bpm = bpm
         self.ticks_per_beat = ticks_per_beat
         self.pitch_bend_range = pitch_bend_range
         self.velocity = velocity
         self.volume_cc = volume_cc
-        self.formant_mode = formant_mode
 
         # State tracking per channel
         self.channel_state: dict[int, dict] = {}
@@ -68,16 +68,13 @@ class MidiEventGenerator:
         Returns:
             Tuple of (LSB, MSB) for MIDI pitch bend message
         """
-        # Clamp to ±pitch_bend_range semitones
         semitone_offset = max(
             -self.pitch_bend_range, min(self.pitch_bend_range, semitone_offset)
         )
 
-        # Calculate 14-bit value: center=8192, range=±8191
         bend_value = int(8192 + (semitone_offset / self.pitch_bend_range) * 8191)
-        bend_value = max(0, min(16383, bend_value))  # Ensure valid range
+        bend_value = max(0, min(16383, bend_value))
 
-        # Split into LSB and MSB (7 bits each)
         lsb = bend_value & 0x7F
         msb = (bend_value >> 7) & 0x7F
 
@@ -101,13 +98,14 @@ class MidiEventGenerator:
         last_frequency_hz: float | None,
         current_volume_db: float,
         last_volume_db: float,
+        is_formant_stable: bool = False,
     ) -> bool:
         """
         Determine if a new note-on event should be triggered.
 
-        Triggers new note when:
-        1. Volume exceeds hysteresis threshold (+9dB from baseline)
-        2. Last note is None (initial trigger)
+        In stable formant mode, requires larger frequency jumps to trigger new notes,
+        preferring pitch bend adjustments instead. This reduces note chatter on
+        sustained vowels and produces cleaner sound.
 
         Args:
             current_midi_note: Current MIDI note number
@@ -116,25 +114,27 @@ class MidiEventGenerator:
             last_frequency_hz: Last tracked frequency (None if not tracking)
             current_volume_db: Current amplitude in dB
             last_volume_db: Previous amplitude in dB
+            is_formant_stable: Whether this channel has entered stable formant mode
 
         Returns:
             True if new note-on should be triggered
         """
-        # No previous note = need to trigger
         if last_note is None:
             return True
 
-        # Volume hysteresis: require +9dB increase to trigger new note
         volume_jump = current_volume_db - last_volume_db
         if volume_jump >= 9.0:
             return True
 
-        # For active tracking, also check if frequency is outside tight range
         if last_frequency_hz is not None and current_freq_hz > 0:
-            # True semitone distance from expected
-            semitone_drift = self._semitones_between_frequencies(last_frequency_hz, current_freq_hz)
-            
-            # If drift exceeds pitch bend range, need new note
+            semitone_drift = self._semitones_between_frequencies(
+                last_frequency_hz, current_freq_hz
+            )
+
+            if is_formant_stable:
+                if abs(semitone_drift) < 1.5:
+                    return False
+
             if abs(semitone_drift) > self.pitch_bend_range:
                 return True
 
@@ -153,13 +153,12 @@ class MidiEventGenerator:
             channel: MIDI channel (1-16)
             time: Time in seconds
         """
-        # Select Pitch Bend Range parameter (RPN)
         self.events.append(
             MidiEvent(
                 time=time,
                 event_type="cc",
                 channel=channel,
-                data={"cc_number": 101, "value": 0},  # RPN MSB = 0 (Pitch Bend Range)
+                data={"cc_number": 101, "value": 0},
             )
         )
         self.events.append(
@@ -167,17 +166,16 @@ class MidiEventGenerator:
                 time=time,
                 event_type="cc",
                 channel=channel,
-                data={"cc_number": 100, "value": 0},  # RPN LSB = 0
+                data={"cc_number": 100, "value": 0},
             )
         )
 
-        # Set pitch bend range to 24 semitones
         self.events.append(
             MidiEvent(
                 time=time,
                 event_type="cc",
                 channel=channel,
-                data={"cc_number": 38, "value": 0},  # Data Entry MSB = 0
+                data={"cc_number": 38, "value": 0},
             )
         )
         self.events.append(
@@ -188,17 +186,16 @@ class MidiEventGenerator:
                 data={
                     "cc_number": 6,
                     "value": self.pitch_bend_range,
-                },  # Data Entry LSB = 24
+                },
             )
         )
 
-        # Deselect RPN (null parameter)
         self.events.append(
             MidiEvent(
                 time=time,
                 event_type="cc",
                 channel=channel,
-                data={"cc_number": 101, "value": 127},  # RPN MSB = 127 (null)
+                data={"cc_number": 101, "value": 127},
             )
         )
         self.events.append(
@@ -206,7 +203,7 @@ class MidiEventGenerator:
                 time=time,
                 event_type="cc",
                 channel=channel,
-                data={"cc_number": 100, "value": 127},  # RPN LSB = 127 (null)
+                data={"cc_number": 100, "value": 127},
             )
         )
 
@@ -214,21 +211,24 @@ class MidiEventGenerator:
         self,
         assignments: dict[int, tuple[float, float, int] | None],
         frame_time: float,
+        formant_stability: dict[int, bool] | None = None,
     ):
         """
         Process a single analysis frame and generate MIDI events.
 
-        Implements:
-        - True frequency-based pitch bend calculation
-        - EMA smoothing for smooth pitch bends (α=0.3)
-        - Hysteresis volume triggers (+9dB note-on, -9dB note-off)
+        Uses formant stability information to dynamically adjust pitch bend
+        sensitivity. Stable formants get higher thresholds, reducing warbling
+        on sustained vowels while maintaining responsiveness during transitions.
 
         Args:
             assignments: Dict mapping channel to (freq_hz, amp_db, midi_note) or None
             frame_time: Current time in seconds
+            formant_stability: Dict mapping channel to stability status (optional)
         """
+        if formant_stability is None:
+            formant_stability = {}
+
         for channel, peak in assignments.items():
-            # Initialize channel state if needed
             if channel not in self.channel_state:
                 self.channel_state[channel] = {
                     "active_note": None,
@@ -237,12 +237,13 @@ class MidiEventGenerator:
                     "last_volume_db": -float("inf"),
                     "pitch_bend_initialized": False,
                     "smoothed_frequency_hz": None,
+                    "is_formant_stable": False,
                 }
 
             state = self.channel_state[channel]
+            is_formant_stable = formant_stability.get(channel, False)
 
             if peak is None:
-                # No frequency assigned - turn off note if active
                 if state["active_note"] is not None:
                     self.events.append(
                         MidiEvent(
@@ -257,7 +258,6 @@ class MidiEventGenerator:
 
             freq_hz, amp_db, midi_note = peak
 
-            # Initialize pitch bend range on first use
             if not state["pitch_bend_initialized"]:
                 self.initialize_pitch_bend_range(channel, frame_time)
                 state["pitch_bend_initialized"] = True
@@ -265,13 +265,12 @@ class MidiEventGenerator:
             last_freq_hz = state.get("last_frequency_hz")
             last_note = state.get("last_midi_note")
 
-            # Check if we need a new note or just pitch bend
             should_new_note = self.should_trigger_new_note(
-                midi_note, last_note, freq_hz, last_freq_hz, amp_db, state["last_volume_db"]
+                midi_note, last_note, freq_hz, last_freq_hz, amp_db,
+                state["last_volume_db"], is_formant_stable
             )
 
             if should_new_note:
-                # Turn off previous note if active
                 if state["active_note"] is not None:
                     self.events.append(
                         MidiEvent(
@@ -282,7 +281,6 @@ class MidiEventGenerator:
                         )
                     )
 
-                # Play new note
                 self.events.append(
                     MidiEvent(
                         time=frame_time,
@@ -293,28 +291,24 @@ class MidiEventGenerator:
                 )
 
                 state["active_note"] = midi_note
-                # Reset smoothed frequency to current value
                 state["smoothed_frequency_hz"] = freq_hz
-            
-            # Calculate true semitone offset from center of current note
+
             if state["active_note"] is not None:
                 expected_center = 440.0 * (2.0 ** ((state["active_note"] - 69) / 12.0))
-                semitone_drift = self._semitones_between_frequencies(expected_center, freq_hz)
+                semitone_drift = self._semitones_between_frequencies(
+                    expected_center, freq_hz
+                )
             else:
                 semitone_drift = 0.0
 
-            # Smooth pitch bend using EMA (alpha=0.3) for continuous violin-like transitions
             if state["smoothed_frequency_hz"] is None:
-                # Initialize smoothed frequency
                 state["smoothed_frequency_hz"] = freq_hz
             else:
-                # EMA: smoothed_freq = alpha * new_value + (1 - alpha) * old_smoothed
-                alpha = 0.3
+                alpha = 0.15
                 state["smoothed_frequency_hz"] = (
                     alpha * freq_hz + (1 - alpha) * state["smoothed_frequency_hz"]
                 )
-            
-            # Calculate semitone drift from smoothed (not raw) frequency
+
             if state["active_note"] is not None:
                 expected_center = 440.0 * (2.0 ** ((state["active_note"] - 69) / 12.0))
                 smoothed_semitone_drift = self._semitones_between_frequencies(
@@ -322,29 +316,49 @@ class MidiEventGenerator:
                 )
             else:
                 smoothed_semitone_drift = 0.0
-            
-            # Only send pitch bend if there's actual drift beyond threshold
-            # Only send pitch bend if there's actual drift beyond threshold
-            if abs(smoothed_semitone_drift) > 0.1:
-                lsb, msb = self._calculate_pitch_bend_value(smoothed_semitone_drift)
-                
-                current_bend = (lsb, msb)
-                if state.get("last_pitch_bend") != current_bend:
-                    self.events.append(
-                        MidiEvent(
-                            time=frame_time,
-                            event_type="pitch_bend",
-                            channel=channel,
-                            data={"lsb": lsb, "msb": msb},
-                        )
-                    )
-                    state["last_pitch_bend"] = current_bend
 
-            # Update volume based on amplitude only if changed significantly
+            if is_formant_stable:
+                pitch_bend_threshold = 0.5
+            else:
+                pitch_bend_threshold = 0.3
+
+            send_pitch_bend = False
+
+            if abs(smoothed_semitone_drift) > pitch_bend_threshold:
+                lsb, msb = self._calculate_pitch_bend_value(smoothed_semitone_drift)
+
+                current_bend = (lsb, msb)
+                last_bend = state.get("last_pitch_bend")
+
+                if last_bend is None:
+                    send_pitch_bend = True
+                else:
+                    last_time = state.get("last_pitch_bend_time", 0)
+                    time_since_last = frame_time - last_time
+                    
+                    if time_since_last >= 0.08:
+                        bend_diff = abs(current_bend[0] - last_bend[0]) + abs(current_bend[1] - last_bend[1])
+                        if bend_diff > 10:
+                            send_pitch_bend = True
+
+            if send_pitch_bend:
+                lsb, msb = self._calculate_pitch_bend_value(smoothed_semitone_drift)
+                current_bend = (lsb, msb)
+
+                self.events.append(
+                    MidiEvent(
+                        time=frame_time,
+                        event_type="pitch_bend",
+                        channel=channel,
+                        data={"lsb": lsb, "msb": msb},
+                    )
+                )
+                state["last_pitch_bend"] = current_bend
+                state["last_pitch_bend_time"] = frame_time
+
             normalized_volume = int(((amp_db + 60) / 60) * 127)
             normalized_volume = max(0, min(127, normalized_volume))
 
-            # Only send volume CC if changed by more than 1 unit (avoid spam)
             if (
                 "last_volume_cc" not in state
                 or abs(normalized_volume - state["last_volume_cc"]) > 1
@@ -359,7 +373,6 @@ class MidiEventGenerator:
                 )
                 state["last_volume_cc"] = normalized_volume
 
-            # Update state
             state["last_midi_note"] = midi_note
             state["last_frequency_hz"] = freq_hz
             state["last_volume_db"] = amp_db

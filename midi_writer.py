@@ -184,6 +184,7 @@ def generate_midi_from_audio(
     velocity: int = 100,
     frame_duration: float = 0.020,
     formant_mode: bool = False,
+    stability_threshold: int = 5,
 ) -> None:
     """
     Complete pipeline: convert audio file to MIDI file.
@@ -197,6 +198,7 @@ def generate_midi_from_audio(
         velocity: Fixed note velocity (default 100)
         frame_duration: Analysis frame duration in seconds (default 0.020 = 20ms)
         formant_mode: If True, track multiple peaks per channel for formants
+        stability_threshold: Frames needed before formant stable mode activates
     """
     from audio_loader import load_audio
     from fft_analyzer import compute_cqt, find_dominant_frequencies, hz_to_midi
@@ -238,30 +240,26 @@ def generate_midi_from_audio(
     )
 
     # Initialize channel mapper and MIDI generator
-    channel_mapper = ChannelMapper(n_channels=15, exclude_channel=10)
+    channel_mapper = ChannelMapper(n_channels=15, exclude_channel=10, stability_threshold=stability_threshold)
     midi_generator = MidiEventGenerator(
         bpm=bpm,
         ticks_per_beat=ticks_per_beat,
         pitch_bend_range=pitch_bend_range,
         velocity=velocity,
-        formant_mode=formant_mode,
     )
 
     # Process each frame
     print("Generating MIDI events...")
     n_frames = len(peaks_per_frame)
 
-    for frame_idx, peaks in enumerate(peaks_per_frame):
+    for frame_idx, frame_data in enumerate(peaks_per_frame):
         frame_time = frame_idx * frame_duration
 
-        # Assign bands to channels
-        assignments = channel_mapper.assign_bands_to_channels(peaks, frame_time)
-
-        # Update channel states
+        assignments = channel_mapper.assign_bands_to_channels(frame_data, frame_time)
         channel_mapper.update_channel_states(assignments, frame_time)
 
-        # Generate MIDI events
-        midi_generator.process_frame(assignments, frame_time)
+        formant_stability = channel_mapper.get_formant_stability()
+        midi_generator.process_frame(assignments, frame_time, formant_stability)
 
         if (frame_idx + 1) % 100 == 0:
             print(f"  Processed {frame_idx + 1}/{n_frames} frames...")

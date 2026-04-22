@@ -96,6 +96,14 @@ Output:
         help="Analysis frame rate in Hz (default: 50 = 20ms frames)",
     )
 
+    parser.add_argument(
+        "--stability-threshold",
+        type=int,
+        default=5,
+        dest="stability_threshold",
+        help="Frames needed before formant stable mode activates (default: 5)",
+    )
+
     return parser.parse_args()
 
 
@@ -163,6 +171,7 @@ def main():
         print(f"Velocity:  {args.velocity}")
         print(f"Pitch bend: ±{args.pitch_bend_range} semitones (CC100/101/6)")
         print(f"Frame rate: {args.frame_rate:.0f} Hz ({frame_duration * 1000:.0f}ms)")
+        print(f"Stability threshold: {args.stability_threshold} frames")
         print("=" * 60)
 
         generate_midi_from_audio(
@@ -174,6 +183,7 @@ def main():
             velocity=args.velocity,
             frame_duration=frame_duration,
             formant_mode=args.formant_mode,
+            stability_threshold=args.stability_threshold,
         )
 
     except ImportError as e:

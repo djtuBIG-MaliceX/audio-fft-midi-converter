@@ -1,4 +1,4 @@
-"""Channel-to-frequency band mapping module."""
+"""Channel-to-frequency band mapping module with formant awareness."""
 
 import numpy as np
 import math
@@ -9,7 +9,7 @@ from fft_analyzer import hz_to_midi, midi_to_hz
 
 @dataclass
 class ChannelState:
-    """Track state for a single MIDI channel."""
+    """Track state for a single MIDI channel with formant awareness."""
 
     channel: int
     home_octave_start: int
@@ -22,18 +22,27 @@ class ChannelState:
     note_stable_frames: int = 0
     freq_range_hz: tuple[float, float] = (0.0, 0.0)
     is_warmup: bool = True
-    note_on_threshold: float = -40.0
-    note_off_threshold: float = -49.0
+
+    # Formant tracking fields
+    harmonic_series: list[int] = field(default_factory=list)
+    fundamental_reference_hz: float | None = None
+    formant_stability_count: int = 0
+    is_formant_stable: bool = False
+    last_harmonic_number: int = 0
 
 
 class ChannelMapper:
     """
-    Map frequency bands to MIDI channels using hybrid selection approach.
+    Map frequency peaks to MIDI channels using formant-aware assignment.
 
-    Each channel has a "home" octave band but can grab louder peaks from
-    other octaves if they exceed the +6dB threshold.
-    Supports overlapping bands for better formant capture and state-aware
-    tracking with hysteresis volume triggers.
+    Channels 1-3: Low fundamentals (80-350 Hz) - Vocal pitch tracking
+    Channels 4-7: F1 formant range (200-800 Hz) - First formant + harmonics
+    Channels 8-11: F2 formant range (800-2500 Hz) - Second formant + harmonics
+    Channels 12-14: F3 formant range (2500-3500 Hz) - Third formant + harmonics
+    Channel 15: High harmonics/frequency content (>3500 Hz)
+
+    Supports harmonic series tracking, formant stability detection, and
+    priority-based assignment that prefers harmonically-related peaks.
     """
 
     def __init__(
@@ -41,6 +50,7 @@ class ChannelMapper:
         n_channels: int = 15,
         exclude_channel: int = 10,
         overlap_percent: float = 33.0,
+        stability_threshold: int = 5,
     ):
         """
         Initialize channel mapper.
@@ -49,10 +59,12 @@ class ChannelMapper:
             n_channels: Number of frequency-tracking channels (default 15)
             exclude_channel: Channel to exclude from frequency tracking (10 = percussion)
             overlap_percent: Percentage of overlap between adjacent channels (default 33%)
+            stability_threshold: Frames needed before entering formant stable mode
         """
         self.n_channels = n_channels
         self.exclude_channel = exclude_channel
         self.overlap_percent = overlap_percent
+        self.stability_threshold = stability_threshold
 
         fmin = 65.4
         fmax = 3136.0
@@ -116,10 +128,10 @@ class ChannelMapper:
     def get_channel_for_frequency(self, freq_hz: float) -> list[int]:
         """
         Get all channels that could potentially track a given frequency.
-        
+
         Args:
             freq_hz: Frequency in Hz
-            
+
         Returns:
             List of channel numbers that cover this frequency
         """
@@ -133,69 +145,104 @@ class ChannelMapper:
         
         return channels_for_freq
 
-    def calculate_assignment_score(
+    def _get_channel_index(self, channel_number: int) -> int | None:
+        """Get the internal index for a given MIDI channel number."""
+        for i, ch in enumerate(self.channels):
+            if ch.channel == channel_number:
+                return i
+        return None
+
+    def _calculate_assignment_score(
         self,
         freq_hz: float,
         amp_db: float,
         channel_idx: int,
-        target_frequency_hz: float | None = None,
-    ) -> tuple[float, bool]:
+        fundamental_hz: float | None = None,
+        harmonic_number: int = 0,
+        is_harmonic: bool = False,
+    ) -> float:
         """
         Calculate assignment score for a peak to a channel.
-        
-        For active channels (with target frequency), prefer proximity to target.
-        For inactive channels, prefer louder amplitude.
-        
+
+        Considers frequency band membership, harmonic relationship to fundamental,
+        and amplitude priority with formant-aware weighting.
+
         Args:
             freq_hz: Frequency of the peak
             amp_db: Amplitude of the peak in dB
             channel_idx: Index of the channel being scored
-            target_frequency_hz: Expected frequency for active tracking (optional)
-            
+            fundamental_hz: Current detected vocal fundamental (optional)
+            harmonic_number: Harmonic number of this peak (0 = not a harmonic)
+            is_harmonic: Whether this peak aligns with the harmonic series
+
         Returns:
-            Tuple of (score, should_prefer_this_channel)
-            - score: Higher is better
-            - should_prefer_this_channel: True if this is the best match for active tracking
+            Score value (higher is better)
         """
         min_freq, max_freq = self.get_frequency_range_for_channel(channel_idx)
-        
+
         if not (min_freq <= freq_hz <= max_freq):
-            return (-float("inf"), False)
-        
+            return -float("inf")
+
         center_freq = (min_freq + max_freq) / 2
-        
-        if target_frequency_hz is not None:
-            freq_distance = abs(freq_hz - target_frequency_hz)
-            
-            score = -freq_distance
-            
-            center_distance = abs(freq_hz - center_freq)
-            score -= center_distance * 0.1
-            
-            should_prefer = freq_distance < abs(center_freq - target_frequency_hz)
-            
-            return (score, should_prefer)
-        else:
-            score = amp_db
-            
-            freq_distance = abs(freq_hz - center_freq)
-            max_distance = (max_freq - min_freq) / 2
-            if max_distance > 0:
-                edge_penalty = (freq_distance / max_distance) * 5
-                score -= edge_penalty
-            
-            return (score, True)
+        score = amp_db
+
+        edge_penalty_factor = 3.0
+        freq_distance = abs(freq_hz - center_freq)
+        max_distance = (max_freq - min_freq) / 2
+        if max_distance > 0:
+            edge_penalty = (freq_distance / max_distance) * edge_penalty_factor
+            score -= edge_penalty
+
+        if is_harmonic and fundamental_hz is not None:
+            harmonic_bonus = 0.0
+
+            if channel_idx < 3:
+                if harmonic_number == 1:
+                    harmonic_bonus = 20.0
+                elif harmonic_number <= 3:
+                    harmonic_bonus = 10.0
+
+            elif channel_idx < 7:
+                if harmonic_number >= 2 and harmonic_number <= 4:
+                    harmonic_bonus = 15.0
+                elif harmonic_number == 1:
+                    harmonic_bonus = 8.0
+
+            elif channel_idx < 11:
+                if harmonic_number >= 3 and harmonic_number <= 6:
+                    harmonic_bonus = 15.0
+                elif harmonic_number >= 2 and harmonic_number <= 8:
+                    harmonic_bonus = 5.0
+
+            elif channel_idx < 14:
+                if harmonic_number >= 4 and harmonic_number <= 8:
+                    harmonic_bonus = 12.0
+
+            score += harmonic_bonus
+
+        if channel_idx < 3 and fundamental_hz is not None:
+            freq_distance_from_fund = abs(freq_hz - fundamental_hz)
+            if freq_distance_from_fund < 20.0:
+                score += 15.0
+
+        return score
 
     def assign_bands_to_channels(
         self,
-        peaks_per_frame: list[tuple[float, float, int]],
+        frame_data: dict,
         frame_time: float,
     ) -> dict[int, tuple[float, float, int] | None]:
         """
-        Assign frequency peaks to channels using systematic frequency band mapping.
+        Assign frequency peaks to channels using formant-aware assignment.
+
+        Uses a multi-pass approach:
+        1. First pass assigns fundamental tracking channels (1-3)
+        2. Second pass assigns harmonic peaks to appropriate formant channels
+        3. Third pass handles remaining non-harmonic peaks
 
         Args:
-            peaks_per_frame: List of (freq_hz, amplitude_db, midi_note) tuples for this frame
+            frame_data: Frame analysis data with 'peaks', 'fundamental_hz',
+                       and 'harmonic_groups' keys
             frame_time: Current time in seconds
 
         Returns:
@@ -203,36 +250,104 @@ class ChannelMapper:
         """
         assignments: dict[int, tuple[float, float, int] | None] = {}
 
-        sorted_peaks = sorted(peaks_per_frame, key=lambda x: x[0])
+        for ch in self.channels:
+            assignments[ch.channel] = None
 
-        for ch_idx, channel in enumerate(self.channels):
-            min_freq, max_freq = self.get_frequency_range_for_channel(ch_idx)
-            channel_state = self.channels[ch_idx]
+        peaks = frame_data.get("peaks", [])
+        fundamental_hz = frame_data.get("fundamental_hz")
+        harmonic_groups = frame_data.get("harmonic_groups", [])
 
-            target_freq = None
-            if channel_state.active_note is not None:
-                target_freq = midi_to_hz(channel_state.active_note)
+        assigned_peaks: set[int] = set()
+        used_channels: set[int] = set()
 
-            best_peak: tuple[float, float, int] | None = None
+        sorted_harmonic_groups = sorted(
+            harmonic_groups,
+            key=lambda x: x["amplitude_db"],
+            reverse=True,
+        )
+
+        for harmonic_info in sorted_harmonic_groups:
+            if not harmonic_info["is_harmonic"]:
+                continue
+
+            freq_hz = harmonic_info["frequency_hz"]
+            amp_db = harmonic_info["amplitude_db"]
+            midi_note = harmonic_info["midi_note"]
+            harmonic_number = harmonic_info["harmonic_number"]
+
+            best_channel_idx: int | None = None
             best_score: float = -float("inf")
 
-            for freq_hz, amp_db, midi_note in sorted_peaks:
-                score, _ = self.calculate_assignment_score(
-                    freq_hz, amp_db, ch_idx, target_freq
+            for ch_idx, channel in enumerate(self.channels):
+                if ch_idx in used_channels:
+                    continue
+
+                score = self._calculate_assignment_score(
+                    freq_hz=freq_hz,
+                    amp_db=amp_db,
+                    channel_idx=ch_idx,
+                    fundamental_hz=fundamental_hz,
+                    harmonic_number=harmonic_number,
+                    is_harmonic=True,
                 )
 
                 if score > best_score:
                     best_score = score
-                    best_peak = (freq_hz, amp_db, midi_note)
+                    best_channel_idx = ch_idx
 
-            assignments[channel.channel] = best_peak
+            if best_channel_idx is not None and best_score > -100.0:
+                assignments[self.channels[best_channel_idx].channel] = (
+                    freq_hz, amp_db, midi_note
+                )
+                assigned_peaks.add(peaks.index((freq_hz, amp_db, midi_note)))
+                used_channels.add(best_channel_idx)
+
+        for peak_idx, (freq_hz, amp_db, midi_note) in enumerate(peaks):
+            if peak_idx in assigned_peaks:
+                continue
+
+            best_channel_idx: int | None = None
+            best_score: float = -float("inf")
+
+            for ch_idx, channel in enumerate(self.channels):
+                if ch_idx in used_channels:
+                    continue
+
+                harmonic_number = 0
+                is_harmonic = False
+
+                for hg in harmonic_groups:
+                    if (hg["frequency_hz"] == freq_hz and 
+                        hg["amplitude_db"] == amp_db):
+                        harmonic_number = hg["harmonic_number"]
+                        is_harmonic = hg["is_harmonic"]
+                        break
+
+                score = self._calculate_assignment_score(
+                    freq_hz=freq_hz,
+                    amp_db=amp_db,
+                    channel_idx=ch_idx,
+                    fundamental_hz=fundamental_hz,
+                    harmonic_number=harmonic_number,
+                    is_harmonic=is_harmonic,
+                )
+
+                if score > best_score:
+                    best_score = score
+                    best_channel_idx = ch_idx
+
+            if best_channel_idx is not None and best_score > -80.0:
+                assignments[self.channels[best_channel_idx].channel] = (
+                    freq_hz, amp_db, midi_note
+                )
+                used_channels.add(best_channel_idx)
 
         return assignments
 
     def update_channel_states(
         self, assignments: dict[int, tuple[float, float, int] | None], frame_time: float
     ):
-        """Update internal channel states based on current assignments."""
+        """Update internal channel states based on current assignments with formant stability."""
         self.frame_count += 1
         warmup_frames = 3
 
@@ -256,12 +371,13 @@ class ChannelMapper:
                 channel.is_warmup = False
 
                 if channel.active_note is None:
-                    note_on_threshold = channel.note_on_threshold
+                    note_on_threshold = -40.0
                     if amp_db > note_on_threshold:
                         channel.active_note = midi_note
                         channel.note_start_time = frame_time
                         channel.target_frequency_hz = freq_hz
                         channel.note_stable_frames = 1
+                        channel.formant_stability_count = 0
                 else:
                     if midi_note != channel.active_note:
                         volume_diff = amp_db - channel.last_volume_db
@@ -271,20 +387,20 @@ class ChannelMapper:
                             channel.target_frequency_hz = freq_hz
                             channel.note_start_time = frame_time
                             channel.note_stable_frames = 1
+                            channel.formant_stability_count = 0
                         else:
                             if channel.target_frequency_hz is not None:
                                 current_distance = abs(freq_hz - channel.target_frequency_hz)
-                                prev_freq = channel.last_frequency_hz or 0
+                                prev_freq = channel.last_frequency_hz or freq_hz
                                 prev_distance = abs(prev_freq - channel.target_frequency_hz)
                                 
-                                if current_distance < prev_distance:
+                                if current_distance < prev_distance * 0.8:
                                     channel.active_note = midi_note
                                     channel.target_frequency_hz = freq_hz
                             else:
                                 channel.active_note = midi_note
                                 channel.target_frequency_hz = freq_hz
-        
-                    if midi_note == channel.active_note:
+                    else:
                         channel.note_stable_frames += 1
                         
                         if channel.target_frequency_hz is not None:
@@ -292,18 +408,29 @@ class ChannelMapper:
                             channel.target_frequency_hz = (
                                 alpha * freq_hz + (1 - alpha) * channel.target_frequency_hz
                             )
+
+                    if channel.active_note is not None and channel.target_frequency_hz is not None:
+                        expected_center = midi_to_hz(channel.active_note)
+                        semitone_drift = abs(12.0 * np.log2(freq_hz / expected_center))
+                        
+                        if semitone_drift < 0.2:
+                            channel.formant_stability_count += 1
+                        else:
+                            channel.formant_stability_count = max(0, channel.formant_stability_count - 1)
+
+                        if (channel.formant_stability_count >= self.stability_threshold and
+                            not channel.is_formant_stable):
+                            channel.is_formant_stable = True
+
             else:
-                # No peak assigned
                 if channel.active_note is not None:
                     last_vol = channel.last_volume_db
                     
-                    # Note-off if volume dropped 9dB or less than note-off threshold
-                    if (
-                        last_vol < channel.note_off_threshold
-                        or (last_vol - amp_db) >= 9.0 if 'amp_db' in locals() else last_vol < -30
-                    ):
+                    if last_vol < -49.0 or last_vol < -35:
                         channel.active_note = None
                         channel.target_frequency_hz = None
+                        channel.is_formant_stable = False
+                        channel.formant_stability_count = 0
                 
                 channel.note_stable_frames = 0
 
@@ -313,6 +440,13 @@ class ChannelMapper:
             ch.channel: ch.active_note
             for ch in self.channels
             if ch.active_note is not None
+        }
+
+    def get_formant_stability(self) -> dict[int, bool]:
+        """Get formant stability status per channel."""
+        return {
+            ch.channel: ch.is_formant_stable
+            for ch in self.channels
         }
 
     def reset_frame_count(self):

@@ -22,7 +22,6 @@ def compute_cqt(
     Returns:
         Tuple of (cqt_magnitude_array, frequencies_array)
     """
-    # Compute CQT with specified hop length
     cqt = librosa.cqt(
         y=audio,
         sr=sample_rate,
@@ -33,10 +32,8 @@ def compute_cqt(
         pad_mode="constant",
     )
 
-    # Convert to magnitude (absolute value)
     magnitude = np.abs(cqt)
 
-    # Get corresponding frequencies for each bin
     frequencies = librosa.cqt_frequencies(
         n_bins=n_bins, fmin=librosa.note_to_hz("C1"), bins_per_octave=12
     )
@@ -65,15 +62,12 @@ def compute_stft(
     if hop_length is None:
         hop_length = n_fft // 4
 
-    # Compute STFT
     stft = librosa.stft(
         y=audio, n_fft=n_fft, hop_length=hop_length, window="hann", pad_mode="constant"
     )
 
-    # Convert to magnitude (absolute value)
     magnitude = np.abs(stft)
 
-    # Get corresponding frequencies for each bin
     frequencies = librosa.fft_frequencies(sr=sample_rate, n_fft=n_fft)
 
     return magnitude, frequencies
@@ -93,6 +87,178 @@ def midi_to_hz(midi_note: int) -> float:
     return 440.0 * (2.0 ** ((midi_note - 69) / 12.0))
 
 
+def detect_fundamental(
+    magnitude_db: np.ndarray, frequencies: np.ndarray, frame_idx: int
+) -> tuple[float | None, float]:
+    """
+    Detect the fundamental frequency (pitch) of a voice in the current frame.
+
+    Searches 80-350 Hz range (typical human vocal range) for the strongest peak,
+    then validates by checking for harmonic consistency (presence of 2x, 3x multiples).
+
+    Args:
+        magnitude_db: 2D array of shape (n_bins, n_frames) in dB scale
+        frequencies: Array of frequencies corresponding to bins
+        frame_idx: Current frame index
+
+    Returns:
+        Tuple of (fundamental_frequency_hz, confidence_score)
+        - fundamental_frequency_hz: Detected pitch or None if not found
+        - confidence_score: 0.0-1.0 based on harmonic consistency
+    """
+    frame_magnitude = magnitude_db[:, frame_idx]
+
+    fmin_voice = 80.0
+    fmax_voice = 350.0
+
+    freq_mask = (frequencies >= fmin_voice) & (frequencies <= fmax_voice)
+    voice_bins = np.where(freq_mask)[0]
+
+    if len(voice_bins) == 0:
+        return None, 0.0
+
+    voice_magnitudes = frame_magnitude[voice_bins]
+    max_idx_in_voice = np.argmax(voice_magnitudes)
+    candidate_freq = float(frequencies[voice_bins[max_idx_in_voice]])
+    candidate_amp = float(voice_magnitudes[max_idx_in_voice])
+
+    if candidate_amp < -65.0:
+        return None, 0.0
+
+    harmonic_consistency = 0.0
+    harmonics_checked = 0
+
+    for harmonic_num in range(2, 6):
+        expected_harmonic_freq = candidate_freq * harmonic_num
+
+        if expected_harmonic_freq > 4000.0:
+            break
+
+        closest_bin = np.argmin(np.abs(frequencies - expected_harmonic_freq))
+        harmonic_amp = frame_magnitude[closest_bin]
+
+        if harmonic_amp > candidate_amp - 15.0:
+            harmonic_consistency += 1.0
+
+        harmonics_checked += 1
+
+    if harmonics_checked > 0:
+        harmonic_consistency /= harmonics_checked
+
+    confidence = min(1.0, 0.3 + harmonic_consistency * 0.7)
+
+    return candidate_freq, confidence
+
+
+def identify_harmonic_series(
+    fundamental_hz: float,
+    peaks: list[tuple[float, float, int]],
+    tolerance_semitones: float = 0.5,
+) -> list[dict]:
+    """
+    Group detected peaks into harmonic series based on a fundamental frequency.
+
+    Each peak is checked against the expected frequencies of integer multiples
+    (2x, 3x, 4x, etc.) of the fundamental. Peaks that align with a harmonic
+    are assigned to that harmonic number.
+
+    Args:
+        fundamental_hz: The detected fundamental frequency in Hz
+        peaks: List of (frequency_hz, amplitude_db, midi_note) tuples
+        tolerance_semitones: Frequency tolerance for harmonic matching
+
+    Returns:
+        List of dicts with keys:
+        - 'harmonic_number': int (1 = fundamental, 2 = first overtone, etc.)
+        - 'frequency_hz': float
+        - 'amplitude_db': float
+        - 'midi_note': int
+        - 'is_harmonic': bool (True if aligned with harmonic series)
+    """
+    result = []
+
+    for freq_hz, amp_db, midi_note in peaks:
+        if fundamental_hz is None or fundamental_hz <= 0:
+            result.append({
+                "harmonic_number": 0,
+                "frequency_hz": freq_hz,
+                "amplitude_db": amp_db,
+                "midi_note": midi_note,
+                "is_harmonic": False,
+            })
+            continue
+
+        harmonic_num = freq_hz / fundamental_hz
+        nearest_harmonic = round(harmonic_num)
+
+        if nearest_harmonic < 1:
+            nearest_harmonic = 1
+
+        expected_freq = fundamental_hz * nearest_harmonic
+        semitone_distance = 12.0 * np.log2(freq_hz / expected_freq)
+
+        if abs(semitone_distance) <= tolerance_semitones:
+            result.append({
+                "harmonic_number": nearest_harmonic,
+                "frequency_hz": freq_hz,
+                "amplitude_db": amp_db,
+                "midi_note": midi_note,
+                "is_harmonic": True,
+            })
+        else:
+            result.append({
+                "harmonic_number": 0,
+                "frequency_hz": freq_hz,
+                "amplitude_db": amp_db,
+                "midi_note": midi_note,
+                "is_harmonic": False,
+            })
+
+    return result
+
+
+def calculate_formant_strength(
+    magnitude_db: np.ndarray, frequencies: np.ndarray, frame_idx: int,
+    formant_center_hz: float, formant_bandwidth_hz: float = 200.0
+) -> float:
+    """
+    Calculate the energy strength within a specific formant frequency band.
+
+    Uses a Gaussian weighting centered on the formant center frequency to
+    measure how much energy exists in that particular spectral region.
+
+    Args:
+        magnitude_db: 2D array of shape (n_bins, n_frames) in dB scale
+        frequencies: Array of frequencies corresponding to bins
+        frame_idx: Current frame index
+        formant_center_hz: Center frequency of the formant band (e.g., F1=500Hz)
+        formant_bandwidth_hz: Half-width of the formant band in Hz
+
+    Returns:
+        Normalized strength value between 0.0 and 1.0
+    """
+    frame_magnitude = magnitude_db[:, frame_idx]
+
+    lower_bound = formant_center_hz - formant_bandwidth_hz
+    upper_bound = formant_center_hz + formant_bandwidth_hz
+
+    band_mask = (frequencies >= lower_bound) & (frequencies <= upper_bound)
+    band_indices = np.where(band_mask)[0]
+
+    if len(band_indices) == 0:
+        return 0.0
+
+    band_magnitudes = frame_magnitude[band_indices]
+    max_band_amp = np.max(band_magnitudes)
+
+    if max_band_amp < -60.0:
+        return 0.0
+
+    strength = min(1.0, (max_band_amp + 60.0) / 60.0)
+
+    return strength
+
+
 def find_dominant_frequencies(
     magnitude: np.ndarray,
     frequencies: np.ndarray,
@@ -101,9 +267,15 @@ def find_dominant_frequencies(
     target_frequency_hz: float | None = None,
     bandwidth_semitones: float = 3.0,
     formant_mode: bool = False,
-) -> list[list[tuple[float, float, int]]]:
+) -> list[dict]:
     """
-    Find the dominant frequency peaks in a magnitude spectrum.
+    Find the dominant frequency peaks in a magnitude spectrum with formant awareness.
+
+    In formant mode, returns structured data including fundamental frequency detection
+    and harmonic series grouping. Each frame's output includes:
+    - 'peaks': list of peak dicts with harmonic info
+    - 'fundamental_hz': detected vocal pitch or None
+    - 'formant_strengths': dict of formant band strengths
 
     Args:
         magnitude: 2D array of shape (n_bins, n_frames)
@@ -112,12 +284,15 @@ def find_dominant_frequencies(
         min_db: Minimum amplitude threshold in dB
         target_frequency_hz: Expected frequency for active tracking (optional)
         bandwidth_semitones: Frequency tolerance around target in semitones
-        formant_mode: If True, return up to 3 peaks per channel for formant preservation
+        formant_mode: If True, include fundamental detection and harmonic grouping
 
     Returns:
-        List of tuples (frequency_hz, amplitude_db, midi_note) for each peak
+        List of dicts per frame containing:
+        - 'peaks': list of (frequency_hz, amplitude_db, midi_note) tuples
+        - 'fundamental_hz': detected pitch or None (formant mode only)
+        - 'harmonic_groups': grouped peak data (formant mode only)
+        - 'formant_strengths': dict of formant band strengths (formant mode only)
     """
-    # Convert magnitude to dB
     magnitude_db = librosa.amplitude_to_db(
         magnitude, ref=np.max, amin=1e-10, top_db=-min_db
     )
@@ -128,21 +303,23 @@ def find_dominant_frequencies(
     for frame_idx in range(n_frames):
         frame_magnitude = magnitude_db[:, frame_idx]
 
-        # Determine threshold based on whether we have a target frequency
         if target_frequency_hz is not None:
-            # Active tracking: use tighter threshold (-50dB = min_db + 10)
             active_threshold = min_db + 10
             valid_indices = np.where(frame_magnitude > active_threshold)[0]
         else:
-            # Inactive: use looser threshold (-55dB = min_db + 5)
             inactive_threshold = min_db + 5
             valid_indices = np.where(frame_magnitude > inactive_threshold)[0]
 
         if len(valid_indices) == 0:
-            peaks_per_frame.append([])
+            frame_data = {
+                "peaks": [],
+                "fundamental_hz": None,
+                "harmonic_groups": [],
+                "formant_strengths": {},
+            }
+            peaks_per_frame.append(frame_data)
             continue
 
-        # Filter by bandwidth if target frequency is specified
         if target_frequency_hz is not None:
             freq_range_min = target_frequency_hz / (2 ** (bandwidth_semitones / 12))
             freq_range_max = target_frequency_hz * (2 ** (bandwidth_semitones / 12))
@@ -153,19 +330,19 @@ def find_dominant_frequencies(
             ]
 
         if len(valid_indices) == 0:
-            peaks_per_frame.append([])
+            frame_data = {
+                "peaks": [],
+                "fundamental_hz": None,
+                "harmonic_groups": [],
+                "formant_strengths": {},
+            }
+            peaks_per_frame.append(frame_data)
             continue
 
-        # Calculate exact frequency for centroid refinement
         valid_magnitudes = frame_magnitude[valid_indices]
-
-        # Sort by amplitude (loudest first)
         sorted_indices = valid_indices[np.argsort(valid_magnitudes)[::-1]]
 
-        # Determine how many peaks to return
-        max_peaks = 3 if formant_mode else n_peaks
-
-        # Get top peaks (no local maxima filtering for better formant capture)
+        max_peaks = 20 if formant_mode else n_peaks
         peak_indices = sorted_indices[:max_peaks]
 
         frame_peaks = []
@@ -175,6 +352,46 @@ def find_dominant_frequencies(
             midi_note = hz_to_midi(freq_hz)
             frame_peaks.append((freq_hz, amp_db, midi_note))
 
-        peaks_per_frame.append(frame_peaks)
+        frame_data = {
+            "peaks": frame_peaks,
+            "fundamental_hz": None,
+            "harmonic_groups": [],
+            "formant_strengths": {},
+        }
+
+        if formant_mode:
+            fundamental_hz, confidence = detect_fundamental(
+                magnitude_db, frequencies, frame_idx
+            )
+            frame_data["fundamental_hz"] = fundamental_hz
+
+            if fundamental_hz is not None and len(frame_peaks) > 0:
+                harmonic_groups = identify_harmonic_series(
+                    fundamental_hz, frame_peaks, tolerance_semitones=0.5
+                )
+                frame_data["harmonic_groups"] = harmonic_groups
+
+            formant_centers = {
+                "F1": 500.0,
+                "F2": 1500.0,
+                "F3": 2500.0,
+            }
+            formant_bandwidths = {
+                "F1": 200.0,
+                "F2": 500.0,
+                "F3": 600.0,
+            }
+
+            formant_strengths = {}
+            for formant_name, center in formant_centers.items():
+                strength = calculate_formant_strength(
+                    magnitude_db, frequencies, frame_idx, center,
+                    formant_bandwidths[formant_name]
+                )
+                formant_strengths[formant_name] = strength
+
+            frame_data["formant_strengths"] = formant_strengths
+
+        peaks_per_frame.append(frame_data)
 
     return peaks_per_frame

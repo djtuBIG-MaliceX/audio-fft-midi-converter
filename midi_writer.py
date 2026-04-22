@@ -114,16 +114,16 @@ class MidiFileWriter:
                     msg = Message(
                         "note_on",
                         channel=mido_channel,
-                        note=event.data["note"],
-                        velocity=event.data["velocity"],
+                        note=max(0, min(event.data["note"], 127)),
+                        velocity=max(0, min(event.data["velocity"], 127)),
                         time=delta,
                     )
                 elif event.event_type == "note_off":
                     msg = Message(
                         "note_off",
                         channel=mido_channel,
-                        note=event.data["note"],
-                        velocity=event.data["velocity"],
+                        note=max(0, min(event.data["note"], 127)),
+                        velocity=max(0, min(event.data["velocity"], 127)),
                         time=delta,
                     )
                 elif event.event_type == "pitch_bend":
@@ -140,8 +140,8 @@ class MidiFileWriter:
                     msg = Message(
                         "control_change",
                         channel=mido_channel,
-                        control=event.data["cc_number"],
-                        value=event.data["value"],
+                        control=max(0, min(event.data["cc_number"], 127)),
+                        value=max(0, min(event.data["value"], 127)),
                         time=delta,
                     )
                 else:

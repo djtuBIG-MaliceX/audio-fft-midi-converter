@@ -36,10 +36,10 @@ class ChannelMapper:
     Map frequency peaks to MIDI channels using formant-aware assignment.
 
     Channels 1-3: Low fundamentals (80-350 Hz) - Vocal pitch tracking
-    Channels 4-7: F1 formant range (200-800 Hz) - First formant + harmonics
-    Channels 8-11: F2 formant range (800-2500 Hz) - Second formant + harmonics
-    Channels 12-14: F3 formant range (2500-3500 Hz) - Third formant + harmonics
-    Channel 15: High harmonics/frequency content (>3500 Hz)
+    Channels 4-6: F1 formant range (350-1500 Hz) - First formant + harmonics
+    Channels 7-10: F2/F3 formant range (1500-5000 Hz) - Second/third formants
+    Channels 11-14: Upper harmonics/air (5000-11000 Hz) - Sibilants, consonants, brightness
+    Channel 15: Ultra-high (>11000 Hz) - Air, transients
 
     Supports harmonic series tracking, formant stability detection, and
     priority-based assignment that prefers harmonically-related peaks.
@@ -51,6 +51,7 @@ class ChannelMapper:
         exclude_channel: int = 10,
         overlap_percent: float = 33.0,
         stability_threshold: int = 5,
+        band_definitions: list[tuple[float, float]] | None = None,
     ):
         """
         Initialize channel mapper.
@@ -60,18 +61,33 @@ class ChannelMapper:
             exclude_channel: Channel to exclude from frequency tracking (10 = percussion)
             overlap_percent: Percentage of overlap between adjacent channels (default 33%)
             stability_threshold: Frames needed before entering formant stable mode
+            band_definitions: Optional list of (min_freq, max_freq) tuples for custom bands
         """
         self.n_channels = n_channels
         self.exclude_channel = exclude_channel
         self.overlap_percent = overlap_percent
         self.stability_threshold = stability_threshold
 
-        fmin = 65.4
-        fmax = 3136.0
-
-        log_fmin = math.log(fmin)
-        log_fmax = math.log(fmax)
-        log_range = log_fmax - log_fmin
+        if band_definitions is not None:
+            self.band_definitions = band_definitions
+        else:
+            self.band_definitions = [
+                (80.0, 150.0),
+                (150.0, 250.0),
+                (250.0, 350.0),
+                (350.0, 600.0),
+                (600.0, 1000.0),
+                (1000.0, 1500.0),
+                (1500.0, 2200.0),
+                (2200.0, 3000.0),
+                (3000.0, 4000.0),
+                (4000.0, 5000.0),
+                (5000.0, 6500.0),
+                (6500.0, 8000.0),
+                (8000.0, 9500.0),
+                (9500.0, 11000.0),
+                (11000.0, 14000.0),
+            ]
 
         self.channels: list[ChannelState] = []
         channel_idx = 0
@@ -79,23 +95,28 @@ class ChannelMapper:
         for i in range(n_channels):
             midi_channel = i + 1 if i < exclude_channel - 1 else i + 2
 
-            log_min_freq = log_fmin + i * (log_range / n_channels)
-            log_max_freq = log_fmin + (i + 1) * (log_range / n_channels)
-
-            base_min_freq = math.exp(log_min_freq)
-            base_max_freq = math.exp(log_max_freq)
+            if i < len(self.band_definitions):
+                min_freq, max_freq = self.band_definitions[i]
+            else:
+                log_fmin = math.log(65.4)
+                log_fmax = math.log(14000.0)
+                log_range = log_fmax - log_fmin
+                log_min_freq = log_fmin + i * (log_range / n_channels)
+                log_max_freq = log_fmin + (i + 1) * (log_range / n_channels)
+                min_freq = math.exp(log_min_freq)
+                max_freq = math.exp(log_max_freq)
 
             overlap_factor = 1.0 + (overlap_percent / 100.0) / 2.0
 
             if i == 0:
-                min_freq = base_min_freq
-                max_freq = base_max_freq * overlap_factor
+                min_freq = min_freq
+                max_freq = max_freq * overlap_factor
             elif i == n_channels - 1:
-                min_freq = base_min_freq / overlap_factor
-                max_freq = base_max_freq
+                min_freq = min_freq / overlap_factor
+                max_freq = max_freq
             else:
-                min_freq = base_min_freq / overlap_factor
-                max_freq = base_max_freq * overlap_factor
+                min_freq = min_freq / overlap_factor
+                max_freq = max_freq * overlap_factor
 
             min_note = hz_to_midi(min_freq)
             max_note = hz_to_midi(max_freq)
@@ -217,6 +238,12 @@ class ChannelMapper:
             elif channel_idx < 14:
                 if harmonic_number >= 4 and harmonic_number <= 8:
                     harmonic_bonus = 12.0
+
+            elif channel_idx >= 14:
+                if harmonic_number >= 8 and harmonic_number <= 20:
+                    harmonic_bonus = 15.0
+                elif harmonic_number >= 6 and harmonic_number <= 25:
+                    harmonic_bonus = 8.0
 
             score += harmonic_bonus
 

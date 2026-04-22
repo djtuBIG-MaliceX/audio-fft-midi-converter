@@ -104,6 +104,14 @@ Output:
         help="Frames needed before formant stable mode activates (default: 5)",
     )
 
+    parser.add_argument(
+        "--formant-bands",
+        type=str,
+        default=None,
+        dest="formant_bands",
+        help="Custom frequency bands as comma-separated pairs: 'min1,max1;min2,max2;...' e.g. '80,150;150,250'",
+    )
+
     return parser.parse_args()
 
 
@@ -155,6 +163,20 @@ def main():
         print("Error: Velocity must be between 1 and 127", file=sys.stderr)
         sys.exit(1)
 
+    # Parse custom formant bands if provided
+    band_definitions = None
+    if args.formant_bands:
+        try:
+            band_definitions = []
+            pairs = args.formant_bands.split(";")
+            for pair in pairs:
+                parts = pair.strip().split(",")
+                if len(parts) == 2:
+                    band_definitions.append((float(parts[0].strip()), float(parts[1].strip())))
+            print(f"Parsed {len(band_definitions)} custom formant bands")
+        except (ValueError, IndexError) as e:
+            print(f"Warning: Failed to parse formant bands: {e}", file=sys.stderr)
+
     # Import and run conversion
     try:
         from midi_writer import generate_midi_from_audio
@@ -172,6 +194,8 @@ def main():
         print(f"Pitch bend: ±{args.pitch_bend_range} semitones (CC100/101/6)")
         print(f"Frame rate: {args.frame_rate:.0f} Hz ({frame_duration * 1000:.0f}ms)")
         print(f"Stability threshold: {args.stability_threshold} frames")
+        if band_definitions:
+            print(f"Custom bands: {len(band_definitions)} bands defined")
         print("=" * 60)
 
         generate_midi_from_audio(
@@ -184,6 +208,7 @@ def main():
             frame_duration=frame_duration,
             formant_mode=args.formant_mode,
             stability_threshold=args.stability_threshold,
+            band_definitions=band_definitions,
         )
 
     except ImportError as e:

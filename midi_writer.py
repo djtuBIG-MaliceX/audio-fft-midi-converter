@@ -185,6 +185,7 @@ def generate_midi_from_audio(
     frame_duration: float = 0.020,
     formant_mode: bool = False,
     stability_threshold: int = 5,
+    band_definitions: list[tuple[float, float]] | None = None,
 ) -> None:
     """
     Complete pipeline: convert audio file to MIDI file.
@@ -199,6 +200,7 @@ def generate_midi_from_audio(
         frame_duration: Analysis frame duration in seconds (default 0.020 = 20ms)
         formant_mode: If True, track multiple peaks per channel for formants
         stability_threshold: Frames needed before formant stable mode activates
+        band_definitions: Optional custom frequency band definitions
     """
     from audio_loader import load_audio
     from fft_analyzer import compute_cqt, find_dominant_frequencies, hz_to_midi
@@ -240,7 +242,12 @@ def generate_midi_from_audio(
     )
 
     # Initialize channel mapper and MIDI generator
-    channel_mapper = ChannelMapper(n_channels=15, exclude_channel=10, stability_threshold=stability_threshold)
+    channel_mapper = ChannelMapper(
+        n_channels=15, 
+        exclude_channel=10, 
+        stability_threshold=stability_threshold,
+        band_definitions=band_definitions,
+    )
     midi_generator = MidiEventGenerator(
         bpm=bpm,
         ticks_per_beat=ticks_per_beat,

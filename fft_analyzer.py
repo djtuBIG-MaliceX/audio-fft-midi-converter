@@ -374,12 +374,14 @@ def find_dominant_frequencies(
             formant_centers = {
                 "F1": 500.0,
                 "F2": 1500.0,
-                "F3": 2500.0,
+                "F3": 3500.0,
+                "F4": 7500.0,
             }
             formant_bandwidths = {
                 "F1": 200.0,
                 "F2": 500.0,
-                "F3": 600.0,
+                "F3": 1000.0,
+                "F4": 3500.0,
             }
 
             formant_strengths = {}

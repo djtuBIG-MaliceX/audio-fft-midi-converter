@@ -186,6 +186,7 @@ def generate_midi_from_audio(
     formant_mode: bool = False,
     stability_threshold: int = 5,
     band_definitions: list[tuple[float, float]] | None = None,
+    min_pitch_bend_semitones: float = 1.5,
 ) -> None:
     """
     Complete pipeline: convert audio file to MIDI file.
@@ -253,6 +254,7 @@ def generate_midi_from_audio(
         ticks_per_beat=ticks_per_beat,
         pitch_bend_range=pitch_bend_range,
         velocity=velocity,
+        min_pitch_bend_semitones=min_pitch_bend_semitones,
     )
 
     # Process each frame
@@ -265,8 +267,7 @@ def generate_midi_from_audio(
         assignments = channel_mapper.assign_bands_to_channels(frame_data, frame_time)
         channel_mapper.update_channel_states(assignments, frame_time)
 
-        formant_stability = channel_mapper.get_formant_stability()
-        midi_generator.process_frame(assignments, frame_time, formant_stability)
+        midi_generator.process_frame(assignments, frame_time)
 
         if (frame_idx + 1) % 100 == 0:
             print(f"  Processed {frame_idx + 1}/{n_frames} frames...")

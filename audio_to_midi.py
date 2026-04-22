@@ -112,6 +112,14 @@ Output:
         help="Custom frequency bands as comma-separated pairs: 'min1,max1;min2,max2;...' e.g. '80,150;150,250'",
     )
 
+    parser.add_argument(
+        "--min-pitch-bend-semitones",
+        type=float,
+        default=1.5,
+        dest="min_pitch_bend_semitones",
+        help="Minimum semitone drift to trigger pitch bend (default 1.5, use 0 for none)",
+    )
+
     return parser.parse_args()
 
 
@@ -192,6 +200,7 @@ def main():
         print(f"Timebase:  {args.ticks_per_beat} ticks/quarter note")
         print(f"Velocity:  {args.velocity}")
         print(f"Pitch bend: ±{args.pitch_bend_range} semitones (CC100/101/6)")
+        print(f"Min pitch bend: {args.min_pitch_bend_semitones} semitones")
         print(f"Frame rate: {args.frame_rate:.0f} Hz ({frame_duration * 1000:.0f}ms)")
         print(f"Stability threshold: {args.stability_threshold} frames")
         if band_definitions:

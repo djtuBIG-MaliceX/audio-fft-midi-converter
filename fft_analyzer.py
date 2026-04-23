@@ -93,8 +93,12 @@ def detect_fundamental(
     """
     Detect the fundamental frequency (pitch) of a voice in the current frame.
 
-    Searches 80-350 Hz range (typical human vocal range) for the strongest peak,
-    then validates by checking for harmonic consistency (presence of 2x, 3x multiples).
+    Uses a two-pass approach for speech:
+    1. Direct detection: search 40-500 Hz for the strongest peak
+    2. Harmonic inference: if direct detection fails or is weak, infer the
+       fundamental from the spacing of strong harmonic peaks above 100 Hz.
+       This handles the "missing fundamental" problem where the fundamental
+       itself is very weak compared to formant harmonics.
 
     Args:
         magnitude_db: 2D array of shape (n_bins, n_frames) in dB scale
@@ -108,46 +112,127 @@ def detect_fundamental(
     """
     frame_magnitude = magnitude_db[:, frame_idx]
 
-    fmin_voice = 80.0
-    fmax_voice = 350.0
+    fmin_voice = 40.0
+    fmax_voice = 500.0
+    fmin_harmonics = 100.0
+    fmax_harmonics = 5000.0
 
     freq_mask = (frequencies >= fmin_voice) & (frequencies <= fmax_voice)
     voice_bins = np.where(freq_mask)[0]
 
-    if len(voice_bins) == 0:
+    # Pass 1: Direct detection - find strongest peak in fundamental range
+    candidate_freq = None
+    candidate_confidence = 0.0
+
+    if len(voice_bins) > 0:
+        voice_magnitudes = frame_magnitude[voice_bins]
+        max_idx_in_voice = np.argmax(voice_magnitudes)
+        candidate_freq = float(frequencies[voice_bins[max_idx_in_voice]])
+        candidate_amp = float(voice_magnitudes[max_idx_in_voice])
+
+        if candidate_amp >= -65.0:
+            # Check harmonic consistency
+            harmonic_consistency = 0.0
+            harmonics_checked = 0
+
+            for harmonic_num in range(2, 9):
+                expected_harmonic_freq = candidate_freq * harmonic_num
+                if expected_harmonic_freq > 10000.0:
+                    break
+
+                closest_bin = np.argmin(
+                    np.abs(frequencies - expected_harmonic_freq)
+                )
+                harmonic_amp = frame_magnitude[closest_bin]
+
+                if harmonic_amp > candidate_amp - 18.0:
+                    harmonic_consistency += 1.0
+
+                harmonics_checked += 1
+
+            if harmonics_checked > 0:
+                harmonic_consistency /= harmonics_checked
+
+            candidate_confidence = min(1.0, 0.3 + harmonic_consistency * 0.7)
+
+    # Pass 2: Harmonic inference - find fundamental from harmonic spacing
+    # This handles speech where the fundamental is masked by strong formants
+    if candidate_confidence < 0.3:
+        # Find strong peaks above 100 Hz
+        harmonic_mask = (frequencies >= fmin_harmonics) & (frequencies <= fmax_harmonics)
+        harmonic_bins = np.where(harmonic_mask)[0]
+
+        if len(harmonic_bins) >= 3:
+            harmonic_mags = frame_magnitude[harmonic_bins]
+            # Get peaks that are within 25 dB of the max in this range
+            max_harm_amp = np.max(harmonic_mags)
+            peak_bins = harmonic_bins[harmonic_mags > max_harm_amp - 25.0]
+
+            if len(peak_bins) >= 3:
+                peak_freqs = frequencies[peak_bins]
+                peak_freqs_sorted = np.sort(peak_freqs)
+
+                # Calculate adjacent frequency ratios
+                # The fundamental is the GCD of these ratios
+                best_f0 = None
+                best_score = 0.0
+
+                # Try each candidate fundamental from 30-200 Hz
+                for test_f0 in np.arange(30.0, 200.0, 1.0):
+                    score = 0.0
+                    matches = 0
+
+                    for harmonic_num in range(1, 10):
+                        expected = test_f0 * harmonic_num
+                        if expected < fmin_harmonics:
+                            continue
+                        if expected > fmax_harmonics:
+                            break
+
+                        closest_bin = np.argmin(
+                            np.abs(frequencies - expected)
+                        )
+                        expected_freq = frequencies[closest_bin]
+                        semitone_dist = abs(
+                            12.0 * np.log2(expected_freq / expected)
+                        )
+
+                        if semitone_dist < 1.5:
+                            amp = frame_magnitude[closest_bin]
+                            if amp > max_harm_amp - 30.0:
+                                score += 1.0
+                                matches += 1
+
+                    if matches >= 3 and score > best_score:
+                        best_score = score
+                        best_f0 = test_f0
+
+                if best_f0 is not None and best_score >= 3.0:
+                    # Found a consistent harmonic series
+                    # Refine by averaging the inferred fundamentals from each peak pair
+                    refined_f0s = []
+                    for i in range(len(peak_freqs_sorted) - 1):
+                        for j in range(i + 1, len(peak_freqs_sorted)):
+                            ratio = peak_freqs_sorted[j] / peak_freqs_sorted[i]
+                            # Check if ratio is close to an integer
+                            nearest_int = round(ratio)
+                            if nearest_int >= 2 and nearest_int <= 12:
+                                ratio_error = abs(ratio - nearest_int)
+                                if ratio_error < 0.1:
+                                    inferred_f0 = peak_freqs_sorted[i] / (nearest_int - 1)
+                                    if 30.0 <= inferred_f0 <= 200.0:
+                                        refined_f0s.append(inferred_f0)
+
+                    if refined_f0s:
+                        candidate_freq = float(np.median(refined_f0s))
+                        candidate_confidence = min(
+                            1.0, 0.2 + (len(refined_f0s) * 0.1)
+                        )
+
+    if candidate_freq is None or candidate_confidence < 0.15:
         return None, 0.0
 
-    voice_magnitudes = frame_magnitude[voice_bins]
-    max_idx_in_voice = np.argmax(voice_magnitudes)
-    candidate_freq = float(frequencies[voice_bins[max_idx_in_voice]])
-    candidate_amp = float(voice_magnitudes[max_idx_in_voice])
-
-    if candidate_amp < -65.0:
-        return None, 0.0
-
-    harmonic_consistency = 0.0
-    harmonics_checked = 0
-
-    for harmonic_num in range(2, 6):
-        expected_harmonic_freq = candidate_freq * harmonic_num
-
-        if expected_harmonic_freq > 4000.0:
-            break
-
-        closest_bin = np.argmin(np.abs(frequencies - expected_harmonic_freq))
-        harmonic_amp = frame_magnitude[closest_bin]
-
-        if harmonic_amp > candidate_amp - 15.0:
-            harmonic_consistency += 1.0
-
-        harmonics_checked += 1
-
-    if harmonics_checked > 0:
-        harmonic_consistency /= harmonics_checked
-
-    confidence = min(1.0, 0.3 + harmonic_consistency * 0.7)
-
-    return candidate_freq, confidence
+    return candidate_freq, candidate_confidence
 
 
 def identify_harmonic_series(

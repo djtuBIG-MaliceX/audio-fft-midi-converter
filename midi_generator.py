@@ -99,27 +99,43 @@ class MidiEventGenerator:
         """
         Determine if a new note-on event should be triggered.
 
-        Uses higher threshold to reduce note chatter - only trigger on
-        significant frequency jumps or volume spikes.
+        Prefers pitch bend over note changes for speech - only trigger a new
+        note when the frequency drift is large enough that pitch bend alone
+        cannot handle it (beyond ±12 semitones).
+
+        However, if the MIDI note number has changed by 6+ semitones (half
+        octave), trigger a new note even if the frequency drift is smaller.
+        This handles cases where the center of energy in a band has shifted
+        significantly.
         """
         if last_note is None:
             return True
 
         note_distance = abs(self._semitone_distance(current_midi_note, last_note or 0))
 
-        volume_jump = current_volume_db - last_volume_db
-
-        if note_distance >= 1 and volume_jump >= 8.0:
-            return True
-
+        # Large note distance (octave jump or more) always triggers a new note
         if note_distance > self.pitch_bend_range:
             return True
 
+        # Also trigger if note distance > 6 semitones (half octave)
+        # This catches center-of-energy shifts that the frequency drift
+        # check might miss
+        if note_distance >= 6:
+            return True
+
+        # Check actual frequency drift
         if last_frequency_hz is not None and current_freq_hz > 0:
             semitone_drift = abs(
                 self._semitones_between_frequencies(last_frequency_hz, current_freq_hz)
             )
-            if semitone_drift > 2.5:
+
+            # If frequency drift is within pitch bend range, use pitch bend
+            # instead of triggering a new note.
+            if semitone_drift <= self.pitch_bend_range:
+                return False
+
+            # Only trigger new note if drift exceeds pitch bend range
+            if semitone_drift > self.pitch_bend_range + 1.0:
                 return True
 
         return False
